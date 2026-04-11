@@ -51,6 +51,8 @@ bool ratio_equal(double left, double right) {
     return std::abs(left - right) <= 1e-9;
 }
 
+constexpr double kScoreEpsilon = 1e-9;
+
 double elapsed_seconds(const std::chrono::steady_clock::time_point& start_time) {
     const auto end_time = std::chrono::steady_clock::now();
     const auto duration = std::chrono::duration_cast<std::chrono::duration<double>>(end_time - start_time);
@@ -423,6 +425,29 @@ std::pair<bool, std::string> should_restart(
     return {false, "none"};
 }
 
+std::tuple<double, int, int> select_move_from_valid_moves(
+    const std::vector<std::tuple<double, int, int>>& valid_moves,
+    bool in_diversify_mode,
+    int no_improve_count,
+    int max_no_improve,
+    std::mt19937& rng) {
+    if (valid_moves.empty()) {
+        return {-1.0, -1, -1};
+    }
+
+    const bool force_best = !in_diversify_mode && no_improve_count < std::max(3, max_no_improve / 6);
+    if (force_best || valid_moves.size() == 1) {
+        return valid_moves.front();
+    }
+
+    const int top_n = in_diversify_mode
+        ? std::min(10, static_cast<int>(valid_moves.size()))
+        : std::min(4, static_cast<int>(valid_moves.size()));
+
+    std::uniform_int_distribution<int> pick(0, std::max(0, top_n - 1));
+    return valid_moves[static_cast<std::size_t>(pick(rng))];
+}
+
 }  // namespace
 
 TabuV3Result tabu_search_v3(const Graph& graph, const TabuV3Params& params) {
@@ -581,6 +606,7 @@ TabuV3Result tabu_search_v3(const Graph& graph, const TabuV3Params& params) {
     const auto t_search_start = std::chrono::steady_clock::now();
     int iter_id = 1;
     int no_improve_count = 0;
+    int stagnation_count = 0;
     double sigma_current_solution = global_estimate_threshold;
     int diversify_iters_left = 0;
     const int stagnation_trigger = std::max(1, static_cast<int>(std::ceil(params.backtrack_trigger_ratio * params.max_no_improve)));
@@ -618,7 +644,7 @@ TabuV3Result tabu_search_v3(const Graph& graph, const TabuV3Params& params) {
         const auto restart_decision = should_restart(
             policy,
             iter_id,
-            no_improve_count,
+            stagnation_count,
             stagnation_trigger,
             params.restart_interval,
             cycle_hit);
@@ -642,7 +668,7 @@ TabuV3Result tabu_search_v3(const Graph& graph, const TabuV3Params& params) {
                 sigma_current_solution = average_spread_on_live_edge_subgraphs(sampled_subgraphs, current_solution);
                 append_history(history, max_history_size, current_solution, sigma_current_solution, iter_id);
 
-                no_improve_count = std::max(0, no_improve_count / 2);
+                stagnation_count = std::max(0, stagnation_count / 2);
                 diversify_iters_left = std::max(diversify_iters_left, params.diversify_steps);
                 result.timing.deep_backtracks += 1;
                 if (restart_decision.second == "periodic") {
@@ -710,9 +736,13 @@ TabuV3Result tabu_search_v3(const Graph& graph, const TabuV3Params& params) {
         const auto& removal_loss = removal_pack.first;
         const auto& leave_one_out_unions = removal_pack.second;
 
+        const int removable_limit = std::min(
+            std::max(6, effective_k),
+            static_cast<int>(removal_loss.size()));
+
         const std::vector<int> removable_vertices = select_removable_vertices(
             removal_loss,
-            std::min(std::max(2, effective_k / 3), static_cast<int>(removal_loss.size())));
+            removable_limit);
 
         if (removable_vertices.empty()) {
             result.timing.stopped_no_valid_move = 1;
@@ -752,7 +782,9 @@ TabuV3Result tabu_search_v3(const Graph& graph, const TabuV3Params& params) {
             break;
         }
 
-        const int limit_eval = std::min(1200, static_cast<int>(ranked_moves.size()));
+        const int limit_eval = std::min(
+            std::min(8000, static_cast<int>(ranked_moves.size())),
+            std::max(1800, params.c * 12));
 
         double sigma_best_local = -1.0;
         int best_u = -1;
@@ -784,7 +816,10 @@ TabuV3Result tabu_search_v3(const Graph& graph, const TabuV3Params& params) {
             result.timing.neighbor_evaluations += 1;
 
             const bool is_tabu = iter_id <= tabu_time[static_cast<std::size_t>(v)];
-            if (!is_tabu || sigma_current > global_estimate_threshold) {
+            const bool improves_current = sigma_current > (sigma_current_solution + kScoreEpsilon);
+            const bool beats_global_estimate = sigma_current > (global_estimate_threshold + kScoreEpsilon);
+
+            if (!is_tabu || improves_current || beats_global_estimate) {
                 valid_moves.emplace_back(sigma_current, u, v);
             }
         }
@@ -801,9 +836,12 @@ TabuV3Result tabu_search_v3(const Graph& graph, const TabuV3Params& params) {
                     return std::get<2>(lhs) < std::get<2>(rhs);
                 });
 
-            const int top_k = std::min(12, static_cast<int>(valid_moves.size()));
-            std::uniform_int_distribution<int> pick(0, top_k - 1);
-            const auto& chosen = valid_moves[static_cast<std::size_t>(pick(rng))];
+            const auto chosen = select_move_from_valid_moves(
+                valid_moves,
+                in_diversify_mode,
+                no_improve_count,
+                params.max_no_improve,
+                rng);
             sigma_best_local = std::get<0>(chosen);
             best_u = std::get<1>(chosen);
             best_v = std::get<2>(chosen);
@@ -812,6 +850,7 @@ TabuV3Result tabu_search_v3(const Graph& graph, const TabuV3Params& params) {
         if (best_u < 0 || best_v < 0) {
             if (params.use_deep_backtracking && history.size() > 1) {
                 no_improve_count += 1;
+                stagnation_count += 1;
                 if (params.verbose) {
                     std::cout << "[TABU_V3] Iter="
                               << iter_id
@@ -833,10 +872,19 @@ TabuV3Result tabu_search_v3(const Graph& graph, const TabuV3Params& params) {
         current_solution.insert(best_v);
         sigma_current_solution = sigma_best_local;
 
-        const std::uniform_real_distribution<double> tenure_dist(0.4, 0.8);
-        const int tenure = std::max(1, py_round_to_int(tenure_dist(rng) * static_cast<double>(effective_k)));
+        const int tenure_low = std::max(1, params.t_min);
+        const int tenure_high = std::max(tenure_low, params.t_max);
+        std::uniform_int_distribution<int> tenure_dist(tenure_low, tenure_high);
+        int tenure = tenure_dist(rng);
+        if (stagnation_count >= stagnation_trigger) {
+            tenure += std::max(1, tenure_high / 2);
+        }
+
         tabu_time[static_cast<std::size_t>(best_u)] = iter_id + tenure;
-        tabu_time[static_cast<std::size_t>(best_v)] = iter_id + tenure;
+        const int add_tenure = std::max(1, tenure / 3);
+        tabu_time[static_cast<std::size_t>(best_v)] = std::max(
+            tabu_time[static_cast<std::size_t>(best_v)],
+            iter_id + add_tenure);
 
         node_frequency[static_cast<std::size_t>(best_u)] += 1;
         node_frequency[static_cast<std::size_t>(best_v)] += 1;
@@ -846,7 +894,11 @@ TabuV3Result tabu_search_v3(const Graph& graph, const TabuV3Params& params) {
         std::string improved = "no";
         std::string mc_verified = "n/a";
 
-        if (sigma_best_local > global_estimate_threshold) {
+        const bool estimate_promising = sigma_best_local > (global_estimate_threshold + kScoreEpsilon);
+        const bool periodic_validation =
+            (iter_id % 25 == 0) && (sigma_best_local > (global_estimate_threshold - 1.0));
+
+        if (estimate_promising || periodic_validation) {
             result.timing.global_mc_validations += 1;
             const double candidate_mc_spread = monte_carlo_ic(
                 graph,
@@ -855,7 +907,7 @@ TabuV3Result tabu_search_v3(const Graph& graph, const TabuV3Params& params) {
                 mc_validation_runs,
                 mc_validation_seed);
 
-            if (candidate_mc_spread > global_best_spread) {
+            if (candidate_mc_spread > (global_best_spread + kScoreEpsilon)) {
                 best_global_solution = current_solution;
                 global_best_spread = candidate_mc_spread;
                 global_estimate_threshold = average_spread_on_live_edge_subgraphs(
@@ -875,15 +927,18 @@ TabuV3Result tabu_search_v3(const Graph& graph, const TabuV3Params& params) {
                     static_cast<int>(elite_archive.size()));
 
                 no_improve_count = 0;
+                stagnation_count = 0;
                 improved = "yes";
                 mc_verified = "yes";
             } else {
                 no_improve_count += 1;
+                stagnation_count += 1;
                 improved = "no";
                 mc_verified = "no";
             }
         } else {
             no_improve_count += 1;
+            stagnation_count += 1;
         }
 
         if (params.verbose) {

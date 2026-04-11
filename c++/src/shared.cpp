@@ -1,7 +1,9 @@
 #include "im/shared.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdint>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <optional>
@@ -30,6 +32,21 @@ std::string trim_copy(const std::string& input) {
     }
     const std::size_t end = input.find_last_not_of(" \t\r\n");
     return input.substr(begin, end - begin + 1);
+}
+
+bool infer_directed_from_filename(const std::string& file_path) {
+    std::string name = std::filesystem::path(file_path).filename().string();
+    std::transform(name.begin(), name.end(), name.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+
+    if (name.find("facebook_combined") != std::string::npos) {
+        return false;
+    }
+    if (name.find("wiki-vote") != std::string::npos || name.find("wiki_vote") != std::string::npos) {
+        return true;
+    }
+    return true;
 }
 
 ReachabilityGraph compute_reachability_graph(const std::vector<std::vector<int>>& live_graph) {
@@ -70,11 +87,13 @@ ReachabilityGraph compute_reachability_graph(const std::vector<std::vector<int>>
 
 }  // namespace
 
-Graph load_graph(const std::string& file_path) {
+Graph load_graph(const std::string& file_path, std::optional<bool> directed) {
     std::ifstream input(file_path);
     if (!input.is_open()) {
         throw std::runtime_error("Failed to open dataset file: " + file_path);
     }
+
+    const bool is_directed = directed.value_or(infer_directed_from_filename(file_path));
 
     std::vector<std::pair<int, int>> edges;
     std::vector<int> unique_nodes;
@@ -120,9 +139,13 @@ Graph load_graph(const std::string& file_path) {
         const int u_idx = graph.node_to_index[edge.first];
         const int v_idx = graph.node_to_index[edge.second];
         graph.adj[static_cast<std::size_t>(u_idx)].push_back(v_idx);
+        if (!is_directed && u_idx != v_idx) {
+            graph.adj[static_cast<std::size_t>(v_idx)].push_back(u_idx);
+        }
     }
 
     std::cout << "-> Loaded graph successfully!" << '\n';
+    std::cout << "-> Graph type: " << (is_directed ? "directed" : "undirected") << '\n';
     std::cout << "-> Total vertices |V|: " << unique_nodes.size() << '\n';
 
     return graph;

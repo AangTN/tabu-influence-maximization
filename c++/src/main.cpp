@@ -12,6 +12,7 @@
 
 #include "im/celf.hpp"
 #include "im/shared.hpp"
+#include "im/tabu_helpers.hpp"
 #include "im/tabu_v3.hpp"
 
 namespace fs = std::filesystem;
@@ -50,18 +51,22 @@ struct Args {
     bool tabu_v3_disable_deep_backtracking = false;
 
     int r_eval = 1000;
+    bool skip_final_eval = false;
 };
 
 void print_usage() {
     std::cout
-        << "Usage: tabu_im --algo <celf|tabu_v3> [options]\n"
+        << "Usage: tabu_im --algo <degree_heuristic|celf|tabu_v3> [options]\n"
         << "\nCore options:\n"
-        << "  --algo <celf|tabu_v3>\n"
+        << "  --algo <degree_heuristic|celf|tabu_v3>\n"
         << "  --dataset <file or name in input_txt>\n"
         << "  --k <int>\n"
         << "  --p <float>\n"
         << "  --seed <int>\n"
         << "  --r-eval <int>\n"
+        << "  --skip-final-eval\n"
+        << "\nDegree heuristic options:\n"
+        << "  (no extra options)\n"
         << "\nCELF options:\n"
         << "  --num-subgraphs <int>\n"
         << "\nTabu_v3 options:\n"
@@ -99,6 +104,8 @@ Args parse_args(int argc, char** argv) {
         if (option == "--help" || option == "-h") {
             print_usage();
             std::exit(0);
+        } else if (option == "--skip-final-eval") {
+            args.skip_final_eval = true;
         } else if (option == "--tabu-v3-disable-deep-backtracking") {
             args.tabu_v3_disable_deep_backtracking = true;
         } else if (option == "--algo") {
@@ -156,8 +163,8 @@ Args parse_args(int argc, char** argv) {
         }
     }
 
-    if (!(args.algo == "celf" || args.algo == "tabu_v3")) {
-        throw std::invalid_argument("--algo must be one of: celf, tabu_v3");
+    if (!(args.algo == "degree_heuristic" || args.algo == "celf" || args.algo == "tabu_v3")) {
+        throw std::invalid_argument("--algo must be one of: degree_heuristic, celf, tabu_v3");
     }
 
     return args;
@@ -238,7 +245,19 @@ int main(int argc, char** argv) {
         im::TabuV3Timing tabu_timing;
         bool has_tabu_timing = false;
 
-        if (args.algo == "celf") {
+        double degree_select_time = 0.0;
+        bool has_degree_timing = false;
+
+        if (args.algo == "degree_heuristic") {
+            std::cout << "\nRunning Degree Heuristic...\n";
+
+            const auto t_degree_start = std::chrono::steady_clock::now();
+            for (int node : im::degree_heuristic(graph, args.k)) {
+                seed_set.insert(node);
+            }
+            degree_select_time = elapsed_seconds(t_degree_start);
+            has_degree_timing = true;
+        } else if (args.algo == "celf") {
             std::cout << "\nRunning CELF...\n";
             std::cout << "Live-edge subgraphs: " << args.num_subgraphs << '\n';
 
@@ -297,10 +316,18 @@ int main(int argc, char** argv) {
             has_tabu_timing = true;
         }
 
-        std::cout << "\nEvaluating spread with Monte Carlo (R=" << args.r_eval << ")...\n";
-        const auto t_eval_start = std::chrono::steady_clock::now();
-        const double spread = im::monte_carlo_ic(graph, seed_set, args.p, args.r_eval, eval_seed);
-        const double eval_time = elapsed_seconds(t_eval_start);
+        double spread = 0.0;
+        double eval_time = 0.0;
+        const bool has_final_eval = !args.skip_final_eval;
+
+        if (has_final_eval) {
+            std::cout << "\nEvaluating spread with Monte Carlo (R=" << args.r_eval << ")...\n";
+            const auto t_eval_start = std::chrono::steady_clock::now();
+            spread = im::monte_carlo_ic(graph, seed_set, args.p, args.r_eval, eval_seed);
+            eval_time = elapsed_seconds(t_eval_start);
+        } else {
+            std::cout << "\nSkipping final Monte Carlo evaluation (--skip-final-eval).\n";
+        }
 
         std::cout << "\n========================================================\n";
         std::cout << "Result\n";
@@ -310,13 +337,20 @@ int main(int argc, char** argv) {
         std::cout << "k:          " << args.k << '\n';
         std::cout << "p:          " << args.p << '\n';
         std::cout << std::fixed << std::setprecision(4);
-        std::cout << "Spread:     " << spread << '\n';
+        if (has_final_eval) {
+            std::cout << "Spread:     " << spread << '\n';
+        } else {
+            std::cout << "Spread:     N/A (skipped)\n";
+        }
 
         std::cout << "\nTiming\n";
         if (has_celf_timing) {
             std::cout << "P0 sample subgraphs:" << std::setw(10) << celf_timing.phase_sample_subgraphs << "s\n";
             std::cout << "P1 queue init:      " << celf_timing.phase_init_queue << "s\n";
             std::cout << "P2 k-loop total:    " << celf_timing.phase_k_loop << "s\n";
+            std::cout << "Algorithm core time (exclude P0,P3): "
+                      << (celf_timing.phase_init_queue + celf_timing.phase_k_loop)
+                      << "s\n";
             std::cout << "   recompute time:  " << celf_timing.phase_recompute_only << "s\n";
             std::cout << "   recompute count: " << celf_timing.stale_recompute_count << '\n';
         }
@@ -325,6 +359,9 @@ int main(int argc, char** argv) {
             std::cout << "P0 sample subgraphs:" << std::setw(10) << tabu_timing.phase_sample_subgraphs << "s\n";
             std::cout << "P1 initialize:      " << tabu_timing.phase_init << "s\n";
             std::cout << "P2 tabu search:     " << tabu_timing.phase_search << "s\n";
+            std::cout << "Algorithm core time (exclude P0,P3): "
+                      << (tabu_timing.phase_init + tabu_timing.phase_search)
+                      << "s\n";
             std::cout << "   iterations:      " << tabu_timing.iterations_completed << '\n';
             std::cout << "   neighbor evals:  " << tabu_timing.neighbor_evaluations << '\n';
             std::cout << "   global best:     " << tabu_timing.global_best_spread << '\n';
@@ -337,7 +374,16 @@ int main(int argc, char** argv) {
             std::cout << "   elite size max:  " << tabu_timing.elite_archive_size_max << '\n';
         }
 
-        std::cout << "P3 final eval:      " << eval_time << "s\n";
+        if (has_degree_timing) {
+            std::cout << "P1 degree select:   " << degree_select_time << "s\n";
+            std::cout << "Algorithm core time (exclude P0,P3): " << degree_select_time << "s\n";
+        }
+
+        if (has_final_eval) {
+            std::cout << "P3 final eval:      " << eval_time << "s\n";
+        } else {
+            std::cout << "P3 final eval:      skipped\n";
+        }
         std::cout << "========================================================\n";
     } catch (const std::exception& ex) {
         std::cerr << "Error: " << ex.what() << '\n';

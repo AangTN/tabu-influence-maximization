@@ -63,6 +63,8 @@ std::pair<std::vector<int>, std::unordered_map<int, std::string>> build_candidat
     double unreached_ratio,
     double influence_ratio,
     double random_ratio) {
+    (void)random_ratio;
+
     if (c <= 0) {
         return {{}, {}};
     }

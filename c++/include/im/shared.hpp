@@ -14,7 +14,7 @@ struct ReachabilityGraph {
     std::vector<BitMask> masks_by_node;
 };
 
-Graph load_graph(const std::string& file_path);
+Graph load_graph(const std::string& file_path, std::optional<bool> directed = std::nullopt);
 
 std::vector<ReachabilityGraph> generate_live_edge_subgraphs(
     const Graph& graph,

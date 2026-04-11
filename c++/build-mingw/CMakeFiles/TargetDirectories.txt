@@ -1,0 +1,3 @@
+D:/Tabu IM/c++/build-mingw/CMakeFiles/tabu_im.dir
+D:/Tabu IM/c++/build-mingw/CMakeFiles/edit_cache.dir
+D:/Tabu IM/c++/build-mingw/CMakeFiles/rebuild_cache.dir

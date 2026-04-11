@@ -10,6 +10,16 @@ Vertices = Set[int]
 ReachabilityGraph = Dict[int, int]
 
 
+def _infer_directed_from_filename(path: Path) -> bool:
+    """Infer graph direction from known benchmark dataset names."""
+    name = path.name.lower()
+    if "facebook_combined" in name:
+        return False
+    if "wiki-vote" in name or "wiki_vote" in name:
+        return True
+    return True
+
+
 def _compute_reachability_graph(live_graph: Graph) -> ReachabilityGraph:
     """Build transitive reachability bitmasks for all nodes in one sample."""
     reachability: ReachabilityGraph = {}
@@ -80,9 +90,10 @@ def average_spread_on_live_edge_subgraphs(
     return total_spread / len(sampled_subgraphs)
 
 
-def load_graph(file_path: str | Path) -> Tuple[Graph, Vertices]:
-    """Load a directed graph from an edge list file (u v per line)."""
+def load_graph(file_path: str | Path, directed: bool | None = None) -> Tuple[Graph, Vertices]:
+    """Load graph from edge list (u v per line), with optional directed mode."""
     path = Path(file_path)
+    is_directed = _infer_directed_from_filename(path) if directed is None else directed
     graph: Graph = {}
     vertices: Vertices = set()
 
@@ -102,8 +113,11 @@ def load_graph(file_path: str | Path) -> Tuple[Graph, Vertices]:
                 graph[v] = []
 
             graph[u].append(v)
+            if not is_directed and u != v:
+                graph[v].append(u)
 
     print("-> Loaded graph successfully!")
+    print(f"-> Graph type: {'directed' if is_directed else 'undirected'}")
     print(f"-> Total vertices |V|: {len(vertices)}")
 
     return graph, vertices
